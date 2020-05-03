@@ -1,0 +1,370 @@
+---
+title: "MMA867 Individual Assignment"
+output:
+  word_document: default
+  html_notebook: default
+---
+
+Kaggle Competition: House Prices: Advanced Regression Techniques
+Kaggle Link: https://www.kaggle.com/c/house-prices-advanced-regression-techniques
+
+Competition Description
+The goal is to predict the final price of each of the 1459 homes listed in the test data set for residential homes in Ames, Iowa using the 79 explanatory variables.
+
+1.0 Libraries
+The libraries used in R for the technical analysis are listed below:
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(glmnet)
+library(Metrics)
+library(ggthemes)
+library(scales)
+library(corrplot)
+```
+
+2.0 Significant Cleaning of Data
+This section details the data cleaning process, with findings and assumptions. Importing, combining, and cleaning the two data sets that will be utilized for the competition. The two data sets used: train and test.
+
+2.1 Import Data Sets
+```{r}
+house_data_train <- read.csv(file.choose(), header = TRUE, sep = ",") #load the train data into the house_data_train dataframe
+house_data_test <- read.csv(file.choose(), header = TRUE, sep = ",") #load the test data into the house_data_test dataframe
+```
+
+2.2 Check Imported Data
+The house_data_train dataframe has 79 explanatory variables with 1460 observations. It also contains the SalePrice variable, which will be used as the indepedent variable.
+
+The house_data_test dataframe also has 79 explanatory vairables but with 1459 observations. It does not contain the SalePrice as this dataframe will be used with the final model to predict sale price. 
+```{r}
+dim(house_data_train) # Id 1...1460
+dim(house_data_test) # Id 1461...2919
+```
+
+2.3 Combine Imported Dataframe
+Combine train and test data into house_data_full dataframe for data cleanining and feature engineering, SalePrice column will be added back to cleaned train dataframe.
+```{r}
+#Combine train and test into house_data for data cleaning, SalePrice column will be added back to cleaned dataframe
+house_data_full <- rbind(house_data_train[,-81], house_data_test)
+dim(house_data_full) # Id 1...2919
+```
+
+2.4 Check Missing Values
+Check variables that have missing values and create a frequency table that ranks from variables with most missing values to least missing values.
+```{r}
+#Check house_data_full dataframe for missing values
+missing_values <- colSums(sapply(house_data_full, is.na))
+
+#Create a table 
+missing_values_table <- data.frame(Variables = names(missing_values), Number_of_Missing_Values = missing_values); rownames(missing_values) <- c()
+
+#Remove variables with no missing values 
+missing_values_table_removed <- missing_values_table %>% filter(Number_of_Missing_Values > 0) 
+
+#Sort in descending order
+missing_values_table_sorted <- missing_values_table_removed[order(-missing_values_table_removed$Number_of_Missing_Values),]
+
+#There are 34 variables with missing values, ranging from 2909 to 1.
+print(missing_values_table_sorted)
+```
+
+2.5 Deal with Missing Values
+According to the data description file for the data sets, 15 variables use "NA" to denote that they do not have certain feature. The R program misinterprets these "NA" as missing values. For the remaining 19 variables, "NA" actually indicate missing values. I decide to carry out the following methods to address the missing values accordingly.
+
+2.5.1 Replace "NA"s with None
+For example, PoolQC variable has 2909 "NA"s, which indicate there are 2909 out of 2919 houses with no pools. Therefore, I decide to convert these types of "NA"s into "None". This method is applied to 15 variables.
+```{r}
+m1 <- c("PoolQC", "MiscFeature", "Alley", "Fence", "FireplaceQu", "GarageFinish", "GarageQual", 
+        "GarageCond", "GarageType", "BsmtExposure", "BsmtCond", "BsmtQual", "BsmtFinType2", "BsmtFinType1", "MasVnrType")
+
+house_data_full_cleaned <- house_data_full
+house_data_full_cleaned[, m1] <- apply(house_data_full_cleaned[, m1], MARGIN = 2,
+                                      function(missing_values){
+                                        replace(missing_values, is.na(missing_values), "None")
+                                      }
+                                      )
+```
+
+2.5.2 Replacing Missing Values with Mode
+These variables have only a few missing values, ranging from 1 to 4. For example, MSZoning has 4 missing values, I decide to convert these types of "NAs" to the mode of the variable, which is RL for MSZoning. This method is applied to 11 variables.
+```{r}
+#function to find the mode
+getmode <- function(v){
+  uniqv <- unique(v)
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+m3 <- c("MSZoning", "Utilities", "BsmtFullBath", "BsmtHalfBath", "Functional", "Exterior1st", "Exterior2nd", 
+        "Electrical", "KitchenQual", "GarageCars", "SaleType")
+
+
+house_data_full_cleaned[, m3] <- apply(house_data_full_cleaned[, m3],2,
+                                       function(missing_values){
+                                         replace(missing_values, is.na(missing_values), getmode(missing_values))
+                                       }
+)
+```
+
+
+2.5.3 Replace Missing Values with 0
+These variables have only a few missing values, ranging from 1 to 23. For example, MasVnrArea has 23 missing values, I assume these houses have no masonry veneer type. Therefore, I decide to convert these types of "NA"s into "0". This method applied to 6 variables.
+```{r}
+m2 <- c("MasVnrArea", "BsmtFinSF1", "BsmtFinSF2", "BsmtUnfSF", "TotalBsmtSF", "GarageArea")
+
+house_data_full_cleaned[, m2] <- apply(house_data_full_cleaned[, m2],2,
+                                       function(missing_values){
+                                         replace(missing_values, is.na(missing_values), 0)
+                                       }
+)
+```
+
+2.5.4 Replace Missing Values with Median
+LotFrontage variable provides the linear feet of street connected to property. There are 486 missing values. I decide to imputate with the median of the neighborhood the missing value is located. 
+```{r}
+for (i in 1:nrow(house_data_full_cleaned)){
+        if(is.na(house_data_full_cleaned$LotFrontage[i])){
+               house_data_full_cleaned$LotFrontage[i] <- as.integer(median(house_data_full_cleaned$LotFrontage[house_data_full_cleaned$Neighborhood==house_data_full_cleaned$Neighborhood[i]], na.rm=TRUE)) 
+        }
+}
+summary(house_data_full_cleaned$LotFrontage)
+```
+
+2.5.5 Assume GarageYrBlt is same as YearBuilt
+I decide to assign the value of YearBuilt to the 159 missing values of GarageYrBlt by assuming the year garage is built is same as the year the house is built. 
+```{r}
+house_data_full_cleaned$GarageYrBlt[is.na(house_data_full_cleaned$GarageYrBlt)] <- house_data_full_cleaned$YearBuilt[is.na(house_data_full_cleaned$GarageYrBlt)] 
+```
+
+2.5.6 Check whether All Missing Values have been Addressed
+There are no more variables with missing values. 
+```{r}
+#Check house_data_full dataframe for missing values
+test <- colSums(sapply(house_data_full_cleaned, is.na))
+
+#Create a table 
+test <- data.frame(Variables = names(test), Number_of_Missing_Values = test); rownames(test) <- c()
+
+#Remove variables with no missing values 
+test <- test %>% filter(Number_of_Missing_Values > 0) 
+view(test)
+```
+
+2.6 Classification
+Classify relevant variables to factors and integers
+```{r}
+#Classify relevant variables to factors
+house_data_full_cleaned[m1] <- lapply(house_data_full_cleaned[m1], factor)
+house_data_full_cleaned[m3] <- lapply(house_data_full_cleaned[m3], factor)
+
+#Classfiy relevant variables to integers
+house_data_full_cleaned$BsmtFullBath <- as.integer(house_data_full_cleaned$BsmtFullBath)
+house_data_full_cleaned$BsmtHalfBath <- as.integer(house_data_full_cleaned$BsmtHalfBath)
+house_data_full_cleaned$GarageCars <- as.integer(house_data_full_cleaned$GarageCars)
+```
+
+2.7 Split Cleaned Dataframe to Train and Test
+Split cleaned house data to train and test and add back the SalePrice variable to train dataframe.
+```{r}
+house_data_train_cleaned <- subset(house_data_full_cleaned, Id <= 1460) #separate Id 1...1460 into "train"
+house_data_train_cleaned$SalePrice <- house_data_train$SalePrice # Add the "SalePrice" variable
+house_data_test_cleaned <- subset(house_data_full_cleaned, Id >= 1461) #separate Id 1461...2919 into "test"
+```
+
+3.0 Data Exploration
+Plot density graph for sale price to determine the distribution. The graph below shows that it is rightly skewed.
+```{r}
+plot_sale_price <- ggplot(house_data_train_cleaned, aes(x = SalePrice)) + geom_density() + geom_histogram(aes(y = ..density..),  fill = "blue",  color = "white", alpha = 0.3, bins = 100) + 
+  scale_x_continuous(labels = comma) +
+  ylab("Density") +
+  xlab("Sale Price") +
+  theme_economist()
+plot_sale_price
+```
+
+Apply log to SalePrice to normalize its distribution.
+```{r}
+plot_sale_price <- ggplot(house_data_train_cleaned, aes(x = log(SalePrice))) + geom_density() + geom_histogram(aes(y = ..density..),  fill = "blue",  color = "white", alpha = 0.3, bins = 100) + 
+  ylab("Density") +
+  xlab("Sale Price") +
+  theme_economist()
+plot_sale_price
+```
+
+4.0 Feature Engineering
+Feature engineering creates new variables that can provide more valuable information to create a better predictive model. I decide to carry out the following methods to create new features.
+
+4.1 Categories with Very Few Observations
+There are categories with very few observations: those need to be combined. For example, Alley has 2721 None values, 120 Grvl values, and 79 Pave values. I decide to convert None to 1 and Grvl and Pave to 0
+```{r}
+house_data_full_cleaned_featured <- house_data_full_cleaned
+house_data_full_cleaned_featured$Alley_Featured <- ifelse(house_data_full_cleaned_featured$Alley == "None", 1, 0)
+house_data_full_cleaned_featured$Alley_Featured <- as.integer(house_data_full_cleaned_featured$Alley_Featured)
+```
+
+4.2 Variables with Only Two Categories
+There are variables with only two categories, convert to a Boolean column. For example, Street has only Grvl and Pave categories. I decide to convert Pave to 1 and Grvl to 0.
+```{r}
+house_data_full_cleaned_featured$Street_Featured <- ifelse(house_data_full_cleaned_featured$Street == "Pave", 1, 0)
+house_data_full_cleaned_featured$Street_Featured <- as.integer(house_data_full_cleaned_featured$Street_Featured)
+```
+
+For example, Utilities has only AllPub and NoSeWa categories. I decide to convert AllPub to 1 and NoSeWa to 0.
+```{r}
+house_data_full_cleaned_featured$Utilities_Featured <- ifelse(house_data_full_cleaned_featured$Utilities == "AllPub", 1, 0)
+house_data_full_cleaned_featured$Utilities_Featured <- as.integer(house_data_full_cleaned_featured$Utilities_Featured)
+```
+
+For example, CentralAir has only Y and N categories. I decide to convert Y to 1 and N to 0.
+```{r}
+house_data_full_cleaned_featured$CentralAir_Featured <- ifelse(house_data_full_cleaned_featured$CentralAir == "Y", 1, 0)
+house_data_full_cleaned_featured$CentralAir_Featured <- as.integer(house_data_full_cleaned_featured$CentralAir_Featured)
+```
+
+4.3 Addition of Variables
+There are variables that can be added up together to create a new variable. For example, I decide to add all area variables for a total area variable.
+```{r}
+house_data_full_cleaned_featured$Total_Area_Featured <- house_data_full_cleaned_featured$TotalBsmtSF +
+                                                        house_data_full_cleaned_featured$GrLivArea +
+                                                        house_data_full_cleaned_featured$LotFrontage +
+                                                        house_data_full_cleaned_featured$PoolArea +
+                                                        house_data_full_cleaned_featured$LotArea +
+                                                        house_data_full_cleaned_featured$LowQualFinSF +
+                                                        house_data_full_cleaned_featured$MasVnrArea +
+                                                        house_data_full_cleaned_featured$BsmtFinSF1 +
+                                                        house_data_full_cleaned_featured$BsmtFinSF2 +
+                                                        house_data_full_cleaned_featured$BsmtUnfSF +
+                                                        house_data_full_cleaned_featured$X1stFlrSF +
+                                                        house_data_full_cleaned_featured$X2ndFlrSF +
+                                                        house_data_full_cleaned_featured$GarageArea +
+                                                        house_data_full_cleaned_featured$WoodDeckSF +
+                                                        house_data_full_cleaned_featured$ScreenPorch +
+                                                        house_data_full_cleaned_featured$OpenPorchSF +
+                                                        house_data_full_cleaned_featured$EnclosedPorch +
+                                                        house_data_full_cleaned_featured$X3SsnPorch 
+```
+
+For example, I decide to add all the baths for a total bath variable.
+```{r}
+house_data_full_cleaned_featured$Total_Baths_Featured <- house_data_full_cleaned_featured$FullBath +
+                                                         house_data_full_cleaned_featured$HalfBath +
+                                                         house_data_full_cleaned_featured$BsmtFullBath +
+                                                         house_data_full_cleaned_featured$BsmtHalfBath
+```
+
+4.4 Specific Feature Engineering
+There are variables that can be analyzed together to create a new variable. For example, I decide to compare YearBuilt to YrSold. If they are the same, I assign 1 to the New_House dummy variable. 
+```{r}
+house_data_full_cleaned_featured$New_House <- (house_data_full_cleaned_featured$YearBuilt == house_data_full_cleaned_featured$YrSold) * 1
+```
+
+For example, I decide to compare YearBuilt and YearRemodAdd. If they are different, I assign 1 to the Remodeled dummy variable.
+```{r}
+house_data_full_cleaned_featured$Remodeled <- (house_data_full_cleaned_featured$YearBuilt != house_data_full_cleaned_featured$YearRemodAdd) * 1
+```
+
+For example, I decide to compare YearModAdd and YrSold. If YearRemodAdd is greater than YrSold, I assign 1 to the RecentRemodel.
+```{r}
+house_data_full_cleaned_featured$RecentRemodel <- (house_data_full_cleaned_featured$YearRemodAdd >= house_data_full_cleaned_featured$YrSold) * 1
+```
+
+5 Variable Selection 
+5.1 Split Cleaned and Featured Dataframe to Train and Test
+Split cleaned and featured house data to train and test and add back the SalePrice variable to train dataframe.
+```{r}
+house_data_train_cleaned_featured <- subset(house_data_full_cleaned_featured, Id <= 1460) #separate Id 1...1460 into "train"
+house_data_train_cleaned_featured$SalePrice <- house_data_train$SalePrice # Add the "SalePrice" variable
+house_data_test_cleaned_featured <- subset(house_data_full_cleaned_featured, Id >= 1461) #separate Id 1461...2919 into "test"
+```
+
+5.2 Use Stepwise Regression
+Since there are now 88 explanatory variables, I decide to use stepwise regression to carry out variable selection. Stepwise regresssion combines the forward and backward selecion techniques. 
+
+The regression reduced the number of explanatory variables from 88 to 48, which is a 45.5% reduction.
+```{r}
+fit_2_log_step <- step(lm(log(SalePrice) ~. - Id, data = house_data_train_cleaned_featured), direction = "both")
+```
+
+```{r}
+house_data_test_cleaned_featured_log_step_predicted <- exp(predict(fit_2_log_step, house_data_test_cleaned_featured))
+```
+
+5.3 Correlation Analysis
+Comparing the correlation between numerical variables. First, I create a step_regressed_dataframe containing the 49 variables and the SalePrice. 
+```{r}
+selected_columns <- c("MSZoning" , "LotFrontage" , "LotArea" , "Street" , 
+    "Utilities" , "LotConfig" , "LandSlope" , "Neighborhood" , "Condition1" , 
+    "Condition2" , "BldgType" , "OverallQual" , "OverallCond" , "YearBuilt" , 
+    "YearRemodAdd" , "RoofMatl" , "Exterior1st" , "ExterCond" , "Foundation" , 
+    "BsmtExposure" , "BsmtFinSF1" , "BsmtFinSF2" , "Heating" , "HeatingQC" , 
+    "CentralAir" , "X1stFlrSF" , "X2ndFlrSF" , "BsmtFullBath" , "FullBath" , 
+    "HalfBath" , "KitchenAbvGr" , "KitchenQual" , "TotRmsAbvGrd" , "Functional" , 
+    "Fireplaces" , "GarageCars" , "GarageArea" , "GarageQual" , "GarageCond" , 
+    "WoodDeckSF" , "EnclosedPorch" , "ScreenPorch" , "PoolArea" , "PoolQC" , 
+    "SaleType" , "SaleCondition" , "RecentRemodel" , "Total_Area_Featured", "SalePrice")
+step_regressed_dataframe <-  house_data_train_cleaned_featured[,selected_columns]
+str(step_regressed_dataframe)
+```
+
+Plot correlation for the 25 numerical variables. Based on the analysis, I decide to remove a variable that is highly correlated with the other. For example, GarageArea and GarageCars have a correlation of 0.88. GarageArea has been dropped as it has a lower correlation with SalePrice.  
+
+I also decide to remove LotFrontage as a lot of data are imputated and the correlation with SalePrice is not high. EnclosedPorch has also been removed as it has very low correlation with SalePrice. 
+```{r}
+vars_numeric <- which(sapply(step_regressed_dataframe, is.numeric))
+vars_names_numeric <- names(vars_numeric)
+
+step_regressed_dataframe_numeric <- step_regressed_dataframe[, vars_numeric]
+
+cor <- cor(step_regressed_dataframe_numeric, use = "pairwise.complete.obs")
+
+cor_sorted <- as.matrix(sort(cor[, "SalePrice"], decreasing = TRUE))
+
+cor_high <- names(which(apply(cor_sorted, 1, function(x) abs(x) > 0.5)))
+cor <- cor[cor_high, cor_high]
+
+corrplot.mixed(cor, tl.col = "black", tl.pos = "lt")
+```
+
+6.0 Regularizations
+Regularization penalizes for the model that has too much complexity (too many variables) to avoid overfitting. 
+
+I decide to use LASSO regression. LASSO penalizes the absolute values of the coefficients: most of coefficients will be zero, only the most important coefficients will be non-zero. 
+
+From the above analysis, only 44 explanatory variables have been kept in the model. 
+```{r}
+y <- log(house_data_train_cleaned_featured$SalePrice)
+
+x <- model.matrix(Id ~ MSZoning + Street +
+                    LotConfig + LandSlope + Neighborhood + Condition1 + Condition2 +
+                    BldgType + OverallQual + OverallCond + YearBuilt + YearRemodAdd + Exterior1st + ExterCond +
+                    Foundation + BsmtExposure +
+                    BsmtFinSF1 + BsmtFinSF2 + BsmtUnfSF + Heating + HeatingQC +
+                    CentralAir + X1stFlrSF + X2ndFlrSF + LowQualFinSF + BsmtFullBath +
+                    FullBath + HalfBath + KitchenAbvGr + KitchenQual + TotRmsAbvGrd +
+                    Functional + Fireplaces + GarageCars + GarageQual +
+                    GarageCond + WoodDeckSF + X3SsnPorch + ScreenPorch +
+                    PoolArea + PoolQC + SaleType + SaleCondition + RecentRemodel, house_data_full_cleaned_featured)[,-1]
+
+x <- cbind(house_data_full_cleaned_featured$Id, x)
+
+# split X into testing and training
+x_train <- subset(x, x[, 1] <= 1460)
+x_test <- subset(x, x[, 1] >= 1461)
+
+#LASSO (alpha = 1)
+lasso_fit <- glmnet(x = x_train, y = y, alpha =1)
+plot(lasso_fit, xvar = "lambda")
+
+#selecting the best penalty lambda
+crossval <- cv.glmnet(x = x_train, y = y, alpha =1) #create cross-validation data
+plot(crossval)
+penalty_lasso <- crossval$lambda.min #determine optimal penalty parameter, lambda
+log(penalty_lasso) #see where it was on the graph
+plot(crossval, xlim = c(-5.5, -5), ylim = c(0, 0.05)) #lets zoom-in
+lasso_opt_fit <- glmnet(x = x_train, y = y, alpha = 1, lambda = penalty_lasso) #estimate the model with the optimal penalty
+coef(lasso_opt_fit) #resultant model coefficients
+
+# predicting the performance on the testing set
+lasso_test <- exp(predict(lasso_opt_fit, s = penalty_lasso, newx = x_test))
+
+#write.csv(x = data.frame(Id = house_data_test$Id, SalePrice = lasso_test), row.names = F, file = "./submission_final.csv")
+```
