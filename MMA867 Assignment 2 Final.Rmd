@@ -1,0 +1,546 @@
+---
+title: "MMA867 Assignment 2"
+output:
+  word_document: default
+  html_notebook: default
+---
+
+1. Libraries
+```{r}
+library(forecast)
+library(fpp)
+library(ncdf4)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(repr)
+library(PCICt)
+```
+
+2. Functions
+Used to read Met data set and obtained from: https://crudata.uea.ac.uk/cru/data/temperature/read_cru_hemi.r
+```{r}
+read_cru_hemi <- function(filename) {
+        # read in whole file as table
+        tab <- read.table(filename,fill=TRUE)
+        nrows <- nrow(tab)
+        # create frame
+        hemi <- data.frame(
+                year=tab[seq(1,nrows,2),1],
+                annual=tab[seq(1,nrows,2),14],
+                month=array(tab[seq(1,nrows,2),2:13]),
+                cover=array(tab[seq(2,nrows,2),2:13])
+        )
+        # mask out months with 0 coverage
+        hemi$month.1 [which(hemi$cover.1 ==0)] <- NA
+        hemi$month.2 [which(hemi$cover.2 ==0)] <- NA
+        hemi$month.3 [which(hemi$cover.3 ==0)] <- NA
+        hemi$month.4 [which(hemi$cover.4 ==0)] <- NA
+        hemi$month.5 [which(hemi$cover.5 ==0)] <- NA
+        hemi$month.6 [which(hemi$cover.6 ==0)] <- NA
+        hemi$month.7 [which(hemi$cover.7 ==0)] <- NA
+        hemi$month.8 [which(hemi$cover.8 ==0)] <- NA
+        hemi$month.9 [which(hemi$cover.9 ==0)] <- NA
+        hemi$month.10[which(hemi$cover.10==0)] <- NA
+        hemi$month.11[which(hemi$cover.11==0)] <- NA
+        hemi$month.12[which(hemi$cover.12==0)] <- NA
+        #
+        return(hemi)
+}
+```
+
+2. Data Cleaning
+2.1 Import Data Sets
+```{r}
+met_data = "C:\\Users\\14168\\OneDrive - Queen's University\\Queens' MMA\\MMA 867 Predictive Modelling\\Team Assignments\\Data Set\\Met.dat"
+met_filepath <- paste0(file.choose()) #choose the Met Office Data with document name: Met.nc
+nasa <- read.csv(file.choose(), header = FALSE, skip = 2) #read NASA CSV, skipping the first two rows and set header to off
+nasa_filepath <- paste0(file.choose()) #choose the NASA Office Data with document name: NASA.nc
+```
+
+2.2 Met Data Set
+Import and inspection of source data - conversion to various datasets required for analysis.
+```{r}
+met <- read_cru_hemi(met_data)
+
+met_cleaned <- select(met, -(cover.1:cover.12))
+
+summary(met_cleaned)
+```
+
+Converting wide dataset to long dataset for time series analysis
+```{r}
+met_cleaned <- met_cleaned %>% gather(month, mean_temp_anomaly, month.1:month.12) %>% separate(month, c('interval', 'interval_id'), convert = TRUE) %>% arrange(year, interval_id)
+
+met_cleaned <- select(met_cleaned, -(annual))
+
+met_cleaned <- met_cleaned[!is.na(met_cleaned$mean_temp_anomaly),]
+
+met_cleaned <- met_cleaned[,c('year', 'mean_temp_anomaly')]
+```
+
+2.3 Nasa Data Set
+Import and inspection of source data - conversion to various datasets required for analysis.
+```{r}
+nasa$V1 <- NULL # Drop first column
+
+nasa <- nasa[, 1:12] # keep only the first 12 columns
+nasa_cleaned <- matrix(t(nasa), ncol = 1, nrow = ncol(nasa)*nrow(nasa), byrow = F) #all rows added to one row
+nasa_cleaned <- nasa_cleaned[1:1683,] #remove the last 9 "***" values
+nasa_cleaned <- data.frame(nasa_cleaned) #convert to a data frame
+colnames(nasa_cleaned) <- "temp_anomalies" #change column name to temp_anomalies
+
+nasa_cleaned$temp_anomalies <- as.numeric(as.character(nasa_cleaned$temp_anomalies)) #convert temp_anomalies to numeric
+nasa_cleaned$temperature <- nasa_cleaned$temp_anomalies + 14 #create a new temperature column
+```
+
+2.4 Met Kingston Data Set
+Open a connection to the Met netCDF file. Print the object to show the variables available.
+```{r}
+met_output <- nc_open(met_filepath) # open a connection to a netCDF file
+met_output
+```
+
+Read variables: temperature anomaly, lon, and lat.
+```{r}
+met_temperature_anomaly <- ncvar_get(met_output, varid = "temperature_anomaly") #read temperature_anomaly
+dim(met_temperature_anomaly) #this variable is in a 3-dimensional array with dimensions ordered as first longitude, then latitude, then time:
+met_lon <- ncvar_get(met_output, varid = "longitude") #read longitude dimension
+met_lat <- ncvar_get(met_output, varid = "latitude") #read latitude dimension
+```
+
+The metadata for the file includes information on how this time is reported.
+```{r}
+met_output$dim$time$units
+met_output$dim$calendar #Calendar is in Gregorian, no additional step required
+met_time <- ncvar_get(met_output, varid = "time")
+met_time <- as.Date(met_time, origin = '1850-01-01')
+```
+
+The code below can pull the modeled temperature at a certain location and time step. It will be used for Q3 to obtain temperature for Kingston. The provided postal code is K7L3N6, which corresponds to a latitude of 44.233800 and a longitude of -76.483200.
+```{r}
+met_lon_index <- which.min(abs(met_lon - -76.483200))
+met_lat_index <- which.min(abs(met_lat - 44.233800))
+met_kingston <- met_temperature_anomaly[met_lon_index, met_lat_index,]
+nc_close(met_output) #close netCDF file
+```
+
+2.5 NASA Kingston Data Set
+Open a connection to the NASA netCDF file. Print the object to show the variables available.
+```{r}
+nasa_output <- nc_open(nasa_filepath) # open a connection to a netCDF file
+nasa_output
+```
+
+Read variables: temperature anomaly, lon, and lat.
+```{r}
+nasa_temperature_anomaly <- ncvar_get(nasa_output, varid = "tempanomaly") #read temperature_anomaly
+dim(nasa_temperature_anomaly) #this variable is in a 3-dimensional array with dimensions ordered as first longitude, then latitude, then time:
+nasa_lon <- ncvar_get(nasa_output, varid = "lon") #read longitude dimension
+nasa_lat <- ncvar_get(nasa_output, varid = "lat") #read latitude dimension
+```
+
+The metadata for the file includes information on how this time is reported.
+```{r}
+nasa_output$dim$time$units
+nasa_output$dim$calendar #Calendar is in Gregorian, no additional step required
+nasa_time <- ncvar_get(nasa_output, varid = "time")
+nasa_time <- as.Date(nasa_time, origin = '1800-01-01')
+```
+
+The code below can pull the modeled temperature at a certain location and time step. It will be used for Q3 to obtain temperature for Kingston. The provided postal code is K7L3N6, which corresponds to a latitude of 44.233800 and a longitude of -76.483200.
+```{r}
+nasa_lon_index <- which.min(abs(nasa_lon - -76.483200))
+nasa_lat_index <- which.min(abs(nasa_lat - 44.233800))
+nasa_kingston <- nasa_temperature_anomaly[nasa_lon_index, nasa_lat_index,]
+nc_close(nasa_output) #close netCDF file
+```
+
+3.0 Time Series Predictive Modelling
+3.1 Predictive Model for Met 
+Create a new column for temperature by adding 14 to temperature anomaly. 
+```{r}
+met_cleaned$temperature <- met_cleaned$mean_temp_anomaly + 14.0
+```
+
+Create a time series for Met data, which starts on January 1850 and with a frequency of 12 months.
+```{r}
+met_ts <- ts(met_cleaned$temperature, start=c(1850, 1), frequency = 12)
+```
+
+Training set consists of data from 1850 to January, 2000 and testing set consists of data from February, 2000 to February, 2020.
+```{r}
+train_met <- window(met_ts, end=c(2000, 1))
+test_met <- window(met_ts, start=c(2000, 2))
+```
+
+Run ETS, Arima, and tbats models on the training set. 
+```{r}
+fit_ets_met <- ets(train_met)
+fit_arima_met <- auto.arima(train_met, stepwise = FALSE, approx = FALSE)
+fit_tbats_met <- tbats(train_met)
+```
+
+ETS Model Summary Ouput and Residual Plot. The ETS model is (A, Ad, A): additive error, additive trend with damping, and additive seasonal. It has an AIC of 6067.364.
+```{r}
+print(paste0(rep('-', 20)))
+print('Model: ETS')
+print(paste0(rep('-', 20)))
+print(summary(fit_ets_met))
+checkresiduals(fit_ets_met)
+```
+
+Arima Model Summary Ouput and Residual Plot. The Arima models is (1,1,2)(2,0,0)[12] with drift. It has an AIC of -2376.1.
+```{r}
+print(paste0(rep('-', 20)))
+print('Model: Arima')
+print(paste0(rep('-', 20)))
+print(summary(fit_arima_met))
+checkresiduals(fit_arima_met)
+```
+
+TBATS Model Summary Ouput and Residual Plot.
+```{r}
+print(paste0(rep('-', 20)))
+print('Model: TBATS')
+print(paste0(rep('-', 20)))
+print(summary(fit_tbats_met))
+checkresiduals(fit_tbats_met)
+```
+
+Forecast using ETS, Arima, and TBATS models on the testing set. 
+```{r}
+fc_arima_met <- fit_arima_met %>% forecast(h = length(test_met)) %>% accuracy(test_met)
+fc_ets_met <- fit_ets_met %>% forecast(h = length(test_met)) %>% accuracy(test_met)
+fc_tbats_met <- fit_tbats_met %>% forecast(h = length(test_met)) %>% accuracy(test_met)
+```
+
+Arima has the best prediction accuracy score on the testing set.
+```{r}
+print('ETS Model')
+print(fc_ets_met[,c('RMSE', 'MAE', 'MAPE', 'MASE')])
+
+print('Arima Model')
+print(fc_arima_met[,c('RMSE', 'MAE', 'MAPE', 'MASE')])
+
+print('TBATS Model')
+print(fc_tbats_met[,c('RMSE', 'MAE', 'MAPE', 'MASE')])
+```
+
+Use Arima model to forecast the temperature through December, 2100 with a 90% confidence interval.
+```{r}
+pred_arima_met <- met_ts %>% auto.arima(stepwise = FALSE, approx = FALSE) %>% forecast(h = 970, level = 0.9)
+```
+
+Use TBATS model to forecast the temperature through December, 2100 with a 90% confidence interval. 
+```{r}
+pred_tbats_met <- met_ts %>% tbats() %>% forecast(h = 970, level = 0.9)
+```
+
+Compare Arima model forecast and TBATS model forecast. 
+Arima has smaller 90% confidence interval cone compared to TBATS. It also reflects the increasing trend in temperature. The team decides to use Arima model for the Met data set.
+```{r}
+autoplot(pred_arima_met) #Plot the Arima model forecast
+autoplot(pred_tbats_met) #Plot the TBATS model forecast
+```
+
+3.2 Predictive Model for NASA
+Create a time series for NASA data, which starts on January 1880 and with a frequency of 12 months.
+```{r}
+nasa_ts <- ts(nasa_cleaned$temperature, start = 1880, frequency = 12)  # ts function defines the dataset as timeseries starting Jan 1880 and having seasonality of frequency 12 (monthly) 
+```
+
+Training set consists of data from 1880 to January, 2000 and testing set consists of data from February, 2000 to March, 2020.
+```{r}
+train_nasa <- window(nasa_ts, end=c(2000, 1))
+test_nasa <- window(nasa_ts, start=c(2000, 2))
+```
+
+Run ETS, Arima, and TBATS models on the training set. 
+```{r}
+fit_ets_nasa <- ets(train_nasa)
+fit_arima_nasa <- auto.arima(train_nasa, stepwise = FALSE, approx = FALSE)
+fit_tbats_nasa <- tbats(train_nasa)
+```
+
+ETS Model Summary Ouput and Residual Plot. The ETS model is (A, N, N): additive error, no trend, and no seasonal. It has an AIC of 4111.927.
+```{r}
+print(paste0(rep('-', 20)))
+print('Model: ETS')
+print(paste0(rep('-', 20)))
+print(summary(fit_ets_nasa))
+checkresiduals(fit_ets_nasa)
+```
+
+Arima Model Summary Ouput and Residual Plot. The Arima models is (1,1,2)(2,0,0)[12] with drift. It has an AIC of -2348.74.
+```{r}
+print(paste0(rep('-', 20)))
+print('Model: Arima')
+print(paste0(rep('-', 20)))
+print(summary(fit_arima_nasa))
+checkresiduals(fit_arima_nasa)
+```
+
+TBATS Model Summary Ouput and Residual Plot.
+```{r}
+print(paste0(rep('-', 20)))
+print('Model: TBATS')
+print(paste0(rep('-', 20)))
+print(summary(fit_tbats_nasa))
+checkresiduals(fit_tbats_nasa)
+```
+
+Forecast using ETS, Arima, and tbats models on the testing set. 
+```{r}
+fc_arima_nasa <- fit_arima_nasa %>% forecast(h = length(test_nasa)) %>% accuracy(test_nasa)
+fc_ets_nasa <- fit_ets_nasa %>% forecast(h = length(test_nasa)) %>% accuracy(test_nasa)
+fc_tbats_nasa <- fit_tbats_nasa %>% forecast(h = length(test_nasa)) %>% accuracy(test_nasa)
+```
+
+Arima has the best prediction accuracy score on the testing set.
+```{r}
+print('ETS Model')
+print(fc_ets_nasa[,c('RMSE', 'MAE', 'MAPE', 'MASE')])
+
+print('Arima Model')
+print(fc_arima_nasa[,c('RMSE', 'MAE', 'MAPE', 'MASE')])
+
+print('TBATS Model')
+print(fc_tbats_nasa[,c('RMSE', 'MAE', 'MAPE', 'MASE')])
+```
+
+Use Arima model to forecast the temperature through December, 2100 with a 90% confidence interval.
+```{r}
+pred_arima_nasa <- nasa_ts %>% auto.arima(stepwise = FALSE, approx = FALSE) %>% forecast(h = 969, level = 0.9)
+```
+
+Use TBATS model to forecast the temperature through December, 2100 with a 90% confidence interval.
+```{r}
+pred_tbats_nasa <- nasa_ts %>% tbats() %>% forecast(h = 969, level = 0.9)
+```
+
+Compare Arima model forecast and TBATS model forecast.
+Arima has smaller 90% confidence interval cone compared to TBATS. It also reflects the increasing trend in temeperature. The team decides to use Arima model for the Nasa data set.
+```{r}
+autoplot(pred_arima_nasa)
+autoplot(pred_tbats_nasa)
+```
+
+3.3 Predictive Model for Met Kingston 
+Convert values in temperature anomaly to temperature.
+```{r}
+met_kingston_temperature <- met_kingston + 14.0
+str(met_kingston_temperature)
+```
+
+Create a time series for Met Kingston data, which starts on January 1850 and with a frequency of 12 months.
+```{r}
+met_kingston_ts <- ts(met_kingston_temperature, start = c(1850, 1), frequency = 12)
+```
+
+Decompose Met Kingston Time Series into data, trend, seasonal, and remainder. 
+```{r}
+autoplot(stl(met_kingston_ts, s.window = 3, t.window = 12))
+```
+
+Run ETS, Arima, and TBATS models on the Met Kingston. 
+```{r}
+fit_arima_met_kingston <- met_kingston_ts %>% auto.arima(stepwise = FALSE, approx = FALSE)
+fit_ets_met_kingston <- met_kingston_ts %>% ets()
+fit_tbats_met_kingston <- met_kingston_ts %>% tbats()
+```
+
+Predictive Models Summary Ouput and Residual Plot
+The team decides to use AIC to select the best model for the Kingston data set. It estimates the out of sample prediciton error. Therefore, a lower AIC score is beter.
+
+Arima model had the best AIC score, therefore used to forecast next 100 years and exported.
+
+Arima Summmary Output and Residual Plot. The Arima models is (0,1,5). It has an AIC of 8173.47.
+```{r}
+summary(fit_arima_met_kingston)
+```
+
+ETS Summmary Output and Residual Plot. The ETS model is (A, N, A): additive error, no trend, and additive seasonal. It has an AIC of 17970.88. 
+```{r}
+summary(fit_ets_met_kingston)
+```
+
+TBATS Summmary Output and Residual Plot. It has an AIC of 17898.1.
+```{r}
+fit_tbats_met_kingston
+```
+
+Use Arima model to forecast the temperature through December, 2100 with a 90% confidence interval.
+```{r}
+pred_arima_met_kingston <- fit_arima_met_kingston %>% forecast(h = 970, level = 0.9)
+```
+
+Use ETS model to forecast the temperature through December, 2100 with a 90% confidence interval.
+```{r}
+pred_ets_met_kingston <- fit_ets_met_kingston %>% forecast(h = 970, level = 0.9)
+```
+
+Use TBATS model to forecast the temperature through December, 2100 with a 90% confidence interval.
+```{r}
+pred_tbats_met_kingston <- fit_tbats_met_kingston %>% forecast(h=970, level = 0.9)
+```
+
+Compare Arima model forecast, ETS model forecast, and TBATS model forecast. 
+Arima has smaller variations for the 90% confidence interval cone compared to ETS and TBATS. Arima also has a slight variations in prediction values at the beginning and a constant prediction value throughout 2100. The team decides to use Arima model for Met Kingston.
+```{r}
+autoplot(pred_arima_met_kingston)
+autoplot(pred_ets_met_kingston)
+autoplot(pred_tbats_met_kingston)
+```
+
+3.4 Predictive Model for Nasa Kingston 
+Convert values in temperature anomaly to temperature.
+```{r}
+nasa_kingston_temperature <- nasa_kingston + 14.0
+str(nasa_kingston_temperature)
+```
+
+Create a time series for NASA Kingston data, which starts on January 1880 and with a frequency of 12 months.
+```{r}
+nasa_kingston_ts <- ts(nasa_kingston_temperature, start = c(1880, 1), frequency = 12)
+```
+
+Decompose NASA Kingston Time Series into data, trend, seasonal, and remainder. 
+```{r}
+autoplot(stl(nasa_kingston_ts, s.window = 3, t.window = 12))
+```
+
+Run ETS, Arima, and TBATS models on the NASA Kingston. 
+```{r}
+fit_arima_nasa_kingston <- nasa_kingston_ts %>% auto.arima(stepwise = FALSE, approx = FALSE)
+fit_ets_nasa_kingston <- nasa_kingston_ts %>% ets()
+fit_tbats_nasa_kingston <- nasa_kingston_ts %>% tbats()
+```
+
+Predictive Models Summary Ouput and Residual Plot
+Arima model had the best AIC score, therefore used to forecast next 100 years and exported.
+
+Arima Summmary Output and Residual Plot. The Arima models is (0,1,5). It has an AIC of 6496.88.
+```{r}
+summary(fit_arima_nasa_kingston)
+```
+
+ETS Summmary Output and Residual Plot. The ETS model is (A, N, N): additive error, no trend, and no seasonal. It has an AIC of 14285.42. 
+```{r}
+summary(fit_ets_nasa_kingston)
+```
+
+TBATS Summmary Output and Residual Plot. It has an AIC of 14235.2.
+```{r}
+fit_tbats_nasa_kingston
+```
+
+Use Arima model to forecast the temperature through December, 2100 with a 90% confidence interval.
+```{r}
+pred_arima_nasa_kingston <- fit_arima_nasa_kingston %>% forecast(h = 969, level = 0.9)
+```
+
+Use ETS model to forecast the temperature through December, 2100 with a 90% confidence interval.
+```{r}
+pred_ets_nasa_kingston <- fit_ets_nasa_kingston %>% forecast(h = 969, level = 0.9)
+```
+
+Use TBATS model to forecast the temperature through December, 2100 with a 90% confidence interval.
+```{r}
+pred_tbats_nasa_kingston <- fit_tbats_nasa_kingston %>% forecast(h = 969, level = 0.9)
+```
+
+Compare Arima model forecast, ETS model forecast, and TBATS model forecast. 
+Arima has the smallest 90% confidence cone. The team decides to use Arima model for NASA Kingston.
+```{r}
+autoplot(pred_arima_nasa_kingston)
+autoplot(pred_ets_nasa_kingston)
+autoplot(pred_tbats_nasa_kingston)
+```
+
+4.0 Climate Bet (2007 - 2017)
+Since the Climate Bet Challenge uses Hadley (University of East Anglia and the UK Met Office), the team decides to only use the Met data set to run the predictive and constant models. 
+Training set consists of data from January, 1850 to December, 2006 and testing set consists of data from January, 2007 to December, 2017.
+```{r}
+train_met_new <- window(met_ts, end = c(2006, 12))
+```
+
+The team decides to use Naïve method listed in Chapter 3.1 Some simple forecasting methods of the Forecasting: Principles and Practice book to carry out the constant prediction. The method set all forecasts to be the value of the last observation.
+Run Naive and Arima models on the training set. 
+```{r}
+fit_naive_met <- train_met_new %>% naive(h = 132)
+
+fit_arima_met_new <- train_met_new %>% auto.arima(stepwise = FALSE, approx = FALSE)
+```
+
+Forecast using Naïve and Arima models on the testing set.
+```{r}
+acc_naive_met <- train_met_new %>% naive(h = 132) %>% accuracy(window(met_ts, end = c(2017, 12)))
+
+acc_arima_met <- fit_arima_met_new %>% forecast(h = 132) %>% accuracy(window(met_ts, end = c(2017, 12)))
+```
+
+Arima has the best prediction accuracy score on the testing set.
+```{r}
+print(acc_arima_met[,c('RMSE', 'MAE', 'MAPE', 'MASE')])
+
+print(acc_naive_met[,c('RMSE', 'MAE', 'MAPE', 'MASE')])
+```
+
+Use Arima model to forecast the temperature through December, 2017.
+```{r}
+fc_arima_met <- fit_arima_met_new %>% forecast(h = 132)
+```
+
+Comparison plot for Naïve and Arima Models.
+```{r}
+autoplot(window(met_ts, end = c(2006, 12)), ylab = "Temperature (°C)") +
+        autolayer(fc_arima_met, series = 'Arima', PI = FALSE) +
+        autolayer(fit_naive_met, series = 'Naive', PI = FALSE) +
+        autolayer(window(met_ts, end = c(2017, 12)), series = 'Data') +
+        xlim(c(2000, 2018)) +
+        ylim(c(14, 15.2))
+```
+
+5.0 Different Time Interval (1990 - 2000)
+ 
+Training set consists of data from January, 1850 to December, 1989 and testing set consists of data from January, 1990 to December, 2000.
+```{r}
+train_met_new_alt <- window(met_ts, end = c(1989, 12))
+```
+
+Run Naïve and Arima models on the training set. 
+```{r}
+fit_naive_met_alt <- train_met_new_alt %>% naive(h = 132)
+
+fit_arima_met_new_alt <- train_met_new_alt %>% auto.arima(stepwise = FALSE, approx = FALSE)
+```
+
+Forecast using Naïve and Arima models on the testing set.
+```{r}
+acc_naive_met_alt <- train_met_new_alt %>% naive(h = 132) %>% accuracy(window(met_ts, end = c(2000, 12)))
+
+acc_arima_met_alt <- fit_arima_met_new_alt %>% forecast(h = 132) %>% accuracy(window(met_ts, end = c(2000, 12)))
+```
+
+Naïve the best prediction accuracy score on the testing set.
+```{r}
+print(acc_arima_met_alt[,c('RMSE', 'MAE', 'MAPE', 'MASE')])
+
+print(acc_naive_met_alt[,c('RMSE', 'MAE', 'MAPE', 'MASE')])
+```
+
+Use Arima model to forecast the temperature through December, 2000.
+```{r}
+fc_arima_met_alt <- fit_arima_met_new_alt %>% forecast(h=132)
+```
+
+Comparison plot for Naïve and Arima Models.
+```{r}
+autoplot(window(met_ts, end = c(1989, 12)), ylab = "Temperature (°C)") +
+        autolayer(fc_arima_met_alt, series = 'Arima', PI = FALSE) +
+        autolayer(fit_naive_met_alt, series = 'Naïve', PI = FALSE) +
+        autolayer(window(met_ts, end = c(2000, 12)), series = 'Data') +
+        xlim(c(1982, 2001)) +
+        ylim(c(13.6, 14.8)) 
+```
