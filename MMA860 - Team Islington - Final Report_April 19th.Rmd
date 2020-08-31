@@ -1,0 +1,1138 @@
+---
+title: "MMA 860 - Team Islington Final Report"
+output:
+  word_document: default
+  html_notebook: default
+---
+
+This technical report details the process Team Islington undertakes to carry out 2017 and 2018 Bike Share Toronto Ridership analysis.
+
+1.0 Libraries
+The libraries used in R for the technical analysis are listed below:
+```{r}
+library(ggplot2)
+library(plyr)
+library(stringdist)
+library(jsonlite)
+library(stringr)
+library(opendatatoronto)
+library(dplyr)
+library(tidyverse)
+library(data.table)
+library(mice)
+library(lubridate)
+library(geosphere)
+library(purrr)
+library(geodist)
+library(car)
+library(estimatr)
+```
+
+2.0 Significant Cleaning of Data
+This section details the data cleaning process, with findings and assumptions. Importing, inspecting, and cleaning three datasets that will be utilized for MMA 860 Team Project.Three datasets are used: Bike Share Trip Data, Bike Share Station Data, and Weather Data.  
+
+2.1 Source Data Variables
+Sources are noted below.
+Bike Share Trip (2017-2018): https://open.toronto.ca/dataset/bike-share-toronto-ridership-data/
+Toronto Bike Station Data: https://tor.publicbikesystem.net/ube/gbfs/v1/en/station_information
+Weather Data (1937-2018): https://www.kaggle.com/rainbowgirl/climate-data-toronto-19372018
+```{r}
+json_stations <- "https://tor.publicbikesystem.net/ube/gbfs/v1/en/station_information"
+
+path_rides = "C:\\Users\\14168\\OneDrive - Queen's University\\Queens' MMA\\MMA 860 Acquisition and Management of Data\\Team Project\\3. Bike Share\\"
+csv_list_rides <- c("Bike Share Toronto Ridership_Q1 2018.csv",
+          "Bike Share Toronto Ridership_Q2 2018.csv",
+          "Bike Share Toronto Ridership_Q3 2018.csv",
+          "Bike Share Toronto Ridership_Q4 2018.csv",
+          "Bikeshare Ridership (2017 Q1).csv",
+          "Bikeshare Ridership (2017 Q2).csv",
+          "Bikeshare Ridership (2017 Q3).csv",
+          "Bikeshare Ridership (2017 Q4).csv")
+
+csv_weather <- "C:\\Users\\14168\\OneDrive - Queen's University\\Queens' MMA\\MMA 860 Acquisition and Management of Data\\Team Project\\Toronto_temp.csv" 
+```
+
+2.2 Functions
+Fuzzy Matching to see if we can find a similar station name.
+Adapted from: https://stackoverflow.com/questions/26405895/how-can-i-match-fuzzy-match-strings-from-two-datasets
+```{r}
+fuzzmatch <- function(a,b,ret=FALSE){
+    #Make matrix of distances using Jaro-Winkler Distance
+    d <- expand.grid(a$name,b$name)
+    names(d) <- c("a_name","b_name")
+    d$dist <- stringdist(d$a_name,d$b_name, method="jw")
+    greedyAssign <- function(a,b,d){
+        x <- numeric(length(a)) 
+        while(any(x==0)){
+            min_d <- min(d[x==0]) 
+            a_sel <- a[d==min_d & x==0][1] 
+            b_sel <- b[d==min_d & a == a_sel & x==0][1] 
+            x[a==a_sel & b == b_sel] <- 1
+            x[x==0 & (a==a_sel|b==b_sel)] <- -1
+        }
+        cbind(a=a[x==1],b=b[x==1],d=d[x==1])
+    }
+    result = data.frame(greedyAssign(as.character(d$a_name),as.character(d$b_name),d$dist))
+    ifelse(ret==TRUE,return(result),print(result))
+}
+```
+
+2.3 Bike Station Data
+Import Bike Station Data from JSON link and extract variables of interest into a new dataframe object (df_stations).
+
+2.3.1 Import Data from JSON
+```{r}
+json_stations_import <- fromJSON(json_stations, flatten=TRUE)
+```
+
+2.3.2 Check Data Import
+```{r}
+#str(json_stations_import) Commented out due to long list of output
+names(json_stations_import$data$stations)
+```
+
+2.3.3 Extract Bike Station Data into Dataframe
+```{r}
+data_stations <- data.frame(do.call(rbind, json_stations_import$data))
+names(data_stations)
+```
+
+2.3.4 Check Data of Interest: Name, ID, Lat, Lon, and Count
+```{r}
+factor(data_stations$name)
+factor(data_stations$station_id)
+summary(data_stations$lat)
+summary(data_stations$lon)
+nrow(data_stations)
+```
+
+2.3.5 Check for Duplications in Station ID
+```{r}
+duplicate_count <- data.frame(table(data_stations$station_id))
+duplicate_count[duplicate_count$Freq >1, ]
+#print(duplicate_count) Commented out due to long list of output
+```
+
+2.3.6 Create New Dataframe with Data of Interest
+```{r}
+df_stations <- data.frame("id" = data_stations$station_id,
+                         "name" = data_stations$name,
+                         "lat"= data_stations$lat,
+                         "lon" = data_stations$lon)
+names(df_stations)
+```
+
+2.3.7 Check New Dataframe for Bike Share Station Data
+```{r}
+names(df_stations)
+factor(df_stations$name)
+factor(df_stations$station_id)
+summary(df_stations$lat)
+summary(df_stations$lon)
+nrow(df_stations)
+```
+
+2.4 Ridership Data
+Import ridership data for years 2017 - 2018, inspect datasets, clean values of interest, and create consolidated single dataframe object.
+
+2.4.1 Import Ridership Data
+Reviewing parsing information indicated that last two sheets were missing Station ID variables - confirm in next step.
+```{r}
+csv_rides_import <- paste(path_rides, csv_list_rides,sep="") %>%
+    map(read_csv)
+```
+
+2.4.2 Check Variables per Sheet
+Printing variable names per sheet confirmed that sheets 7 and 8 (2017 Q3 and Q4) are missing Station IDs, therefore will have to be either 
+(1) manually added or 
+(2) link would be established using station names.  
+Option (1) is preferred.
+```{r}
+for (i in 1:length(csv_rides_import)) {
+    print(paste0("#",i))
+    print(names(as.data.frame(csv_rides_import[[i]])))
+    print(summary(csv_rides_import[[i]]))
+}
+
+fullcount = 0
+
+for (i in 1:length(csv_rides_import)) {
+    print(paste0("#",i))
+    fullcount <- fullcount + nrow(csv_rides_import[[i]])
+}
+
+print(fullcount)
+```
+
+2.4.3 Check Ridership Data Import Variable
+```{r}
+#Commented out due to long list of output
+#typeof(csv_rides_import) 
+#str(csv_rides_import)
+#head(csv_rides_import)
+#tail(csv_rides_import)
+#dim(csv_rides_import)
+```
+
+2.4.4 Check Missing Data per Sheet
+There are no missing values detected.
+```{r}
+#Commented out due to long list of output
+#for(i in 1:length(csv_rides_import)){
+#    md.pattern(as.data.frame(csv_rides_import[i]))
+#}
+```
+
+2.4.5 Check for Duplications in Trip IDs
+```{r}
+alltripid = c(csv_rides_import[[1]]$trip_id,
+              csv_rides_import[[2]]$trip_id,
+              csv_rides_import[[3]]$trip_id,
+              csv_rides_import[[4]]$trip_id,
+              csv_rides_import[[5]]$trip_id,
+              csv_rides_import[[6]]$trip_id,
+              csv_rides_import[[7]]$trip_id,
+              csv_rides_import[[8]]$trip_id)
+freq_per <- data.frame(table(alltripid))
+freq_per[freq_per$freq > 1,]
+```
+
+2.4.6 Check Datetime Formats per Sheet
+Obtained formats:
+Sheets 1-3, 4, 7: m/d/yyyy HM
+Sheets 5, 6: d/m/yyyy HM
+Sheet 8: m/d/yy HMS
+
+Standardized all datetime formats to Ymd HMS. Check New Start and End Time Variables. Single NA in last Sheet - no endtime noted; therefore row dropped.
+
+```{r}
+for (i in 1:length(csv_rides_import)) {
+  print(paste(paste0("#",i), tail(csv_rides_import[[i]]$trip_start_time,10)))
+}
+
+dateformats <- c("mdY HM", "dmY HM", "mdy HMS")
+for (i in 1:length(csv_rides_import)) {
+  csv_rides_import[[i]]$new_start <- parse_date_time(csv_rides_import[[i]]$trip_start_time, orders = dateformats)
+  csv_rides_import[[i]]$new_end <- parse_date_time(csv_rides_import[[i]]$trip_stop_time, orders = dateformats)
+}
+
+collist <- c("new_start", "new_end")
+
+for (i in 1:length(csv_rides_import)) {
+    print(summary(csv_rides_import[[i]][collist]))
+}
+
+csv_rides_import[[8]][is.na(csv_rides_import[[8]]$new_end),]
+nrow(csv_rides_import[[8]])
+csv_rides_import[[8]] <- csv_rides_import[[8]][!is.na(csv_rides_import[[8]]$new_end),]
+nrow(csv_rides_import[[8]])
+summary(csv_rides_import[[8]]$new_end) #confirm removal
+```
+
+2.4.6.1 Check Start Times are before End Times
+Output shows values switched in both sheet 4 (n=4) and sheet 8 (n=5). Cannot determine if values are switched therefore err on side of caution and dropped rows.
+```{r}
+for (i in 1:length(csv_rides_import)) {
+  print(paste0("#",i))
+  print(csv_rides_import[[i]][csv_rides_import[[i]]$new_start > csv_rides_import[[i]]$new_end,])
+  print(rownames(csv_rides_import[[i]][csv_rides_import[[i]]$new_start > csv_rides_import[[i]]$new_end,]))
+}
+csv_rides_import[[8]][1,c("trip_start_time","trip_stop_time","new_start","new_end")]
+
+#Get counts prior to drop
+nrow(csv_rides_import[[8]])
+nrow(csv_rides_import[[4]])
+
+#Drop rows
+csv_rides_import[[8]] <- csv_rides_import[[8]][!(csv_rides_import[[8]]$new_start > csv_rides_import[[8]]$new_end),]
+csv_rides_import[[4]] <- csv_rides_import[[4]][!(csv_rides_import[[4]]$new_start > csv_rides_import[[4]]$new_end),]
+
+#Check cIounts after drop to confirm
+nrow(csv_rides_import[[8]])
+nrow(csv_rides_import[[4]])
+```
+
+2.4.7 Bike Sation Data
+Get all Station Info in Ridership data, check IDs by linking to Bike Station Data, if ID does not have a match, returning a tibble containing unmatched Station Names with Fuzzy Match JW scores for manual evaluation. Sheets 7 and 8 do not have Station IDs therefore are checked separately. No joining or merging of data occurs at this step.
+
+Two stations - IDs 7219 and 7068 identified as having no matches in Bike Station data. Station ID 7219 had limited number of results therefore dropped. Station ID 7068 had a number of results, therefore latitude and longitude added manually to Bike Station dataset. Values for latitude and longitude obtained by googling intersection noted in Station Name. Dockside Dr / Queens Quay E (Sugar Beach) 43.6448Â° N, 79.3654Â° W  
+```{r}
+all_stations <- NULL
+
+for (i in 1:6) {
+  print(paste0("#",i))
+  start_stations <- select(csv_rides_import[[i]], c(from_station_id,from_station_name))
+  end_stations <- select(csv_rides_import[[i]], c(to_station_id,to_station_name))
+  names(start_stations) = names(end_stations) = c("id", "name")
+  all_stations <- rbind(start_stations, end_stations)
+  returntib <- unique(all_stations[!all_stations$id %in% df_stations$id,])
+  print(returntib)
+  ifelse(length(returntib)>0,
+         fuzzmatch(returntib,df_stations,FALSE),
+         print("NONE"))
+}
+
+#Two stations - IDs 7219 and 7068 identified as having no matches in Bike Station data.  
+#Checking counts of trips that contain these Station IDs
+
+countall7219 = 0
+countall7068 = 0
+
+for (i in 1:6){
+  print(paste0("#",i,"-",nrow(csv_rides_import[[i]])))
+  countall7219 = countall7219 + nrow(
+      csv_rides_import[[i]][((csv_rides_import[[i]]$from_station_id == 7219) |
+                             (csv_rides_import[[i]]$to_station_id == 7219)),])
+  countall7068 = countall7068 + nrow(
+      csv_rides_import[[i]][((csv_rides_import[[i]]$from_station_id == 7068) |
+                             (csv_rides_import[[i]]$to_station_id == 7068)),])
+  print(paste0("StationID:7219", 
+               " Count:", 
+               nrow(csv_rides_import[[i]][((csv_rides_import[[i]]$from_station_id == 7219) | 
+                                           (csv_rides_import[[i]]$to_station_id == 7219)),])))
+  print(paste0("StationID:7068", 
+               " Count:", 
+               nrow(csv_rides_import[[i]][((csv_rides_import[[i]]$from_station_id == 7068) | 
+                                           (csv_rides_import[[i]]$to_station_id == 7068)),])))
+}
+
+print(paste0("Total Count 7219:", countall7219))
+print(paste0("Total Count 7068:", countall7068))
+
+for (i in 1:6) {
+  print(paste0("#",i,"-",nrow(csv_rides_import[[i]])))
+  csv_rides_import[[i]] <- csv_rides_import[[i]][!((csv_rides_import[[i]]$from_station_id == 7219) | 
+                                 (csv_rides_import[[i]]$to_station_id == 7219)),]
+  print(nrow(csv_rides_import[[i]]))
+}
+
+for (i in 1:6) {
+  print(paste0("#",i,"-",nrow(csv_rides_import[[i]])))
+  tst <- csv_rides_import[[i]][(csv_rides_import[[i]]$from_station_id == 7068) | 
+                      (csv_rides_import[[i]]$to_station_id == 7068),]
+  print(nrow(tst))
+} 
+
+add_station_info <- data.frame("7068","Dockside Dr / Queens Quay E (Sugar Beach)", "43.6448", "-79.3654")
+names(add_station_info) <- names(df_stations)
+df_stations <- rbind(df_stations, add_station_info)
+view(df_stations)
+```
+
+2.4.7.1 Fuzzy String Matching Station Names in Sheets 7 and 8
+Extract sheets of interest, create a dataframe of unique station names, fuzzy string match to Bike Station dataset.
+
+```{r}
+lstDF <- list()
+
+lstDF[[7]]<- NULL
+lstDF[[8]]<- NULL
+
+print(paste0("#",7))
+
+start_stations <- select(csv_rides_import[[7]], c(from_station_name))
+end_stations <- select(csv_rides_import[[7]], c(to_station_name))
+
+names(start_stations) = names(end_stations) = c("name")
+
+all_stations <- rbind(unique(start_stations), unique(end_stations))
+print(paste0("Count of Stations:",nrow(all_stations)))
+
+lstDF[[7]] <- fuzzmatch(all_stations,data_stations, TRUE)
+view(lstDF[[7]])
+print(paste0("Count of Stations:",nrow(lstDF[[7]])))
+
+#Realised that duplications were occurring with the above method - 
+#therefore overwritten with distinct
+
+lstDF[[7]] <- distinct(lstDF[[7]])
+print(paste0("Count of Stations:",nrow(lstDF[[7]])))
+
+print(paste0("#",8))
+
+start_stations <- select(csv_rides_import[[8]], c(from_station_name))
+end_stations <- select(csv_rides_import[[8]], c(to_station_name))
+
+names(start_stations) = names(end_stations) = c("name")
+
+all_stations <- rbind(unique(start_stations), unique(end_stations))
+print(paste0("Count of Stations:",nrow(all_stations)))
+
+lstDF[[8]] <- fuzzmatch(all_stations,data_stations, TRUE)
+view(lstDF[[8]])
+lstDF[[8]] <- distinct(lstDF[[8]])
+
+```
+
+2.5 Weather Data
+Rename columns and select variables to keep. They are Date, Year, Month, Day, Max_Temp_C, Min_Temp_C, Mean_Temp_C, Total_Rain_mm, Total_snow_cm, Total_precip_mm, and Season.
+
+```{r}
+data_weather <- read_csv(csv_weather)
+
+names(data_weather)
+summary(data_weather)
+
+keep <- c('Date/Time','Year','Month','Day',
+          "Max Temp (C)", "Min Temp (C)", "Mean Temp (C)",
+          "Total Rain (mm)","Total Snow (cm)", "Total Precip (mm)", "season")
+
+newnames <- c('Date','Year','Month','Day',
+              "Max_Temp_C", "Min_Temp_C", "Mean_Temp_C",
+              "Total_Rain_mm","Total_Snow_cm", "Total_Precip_mm", "Season")
+
+data_weather <- data_weather[,keep]
+names(data_weather) <- newnames
+names(data_weather)
+
+table(data_weather$Season)
+
+#Check numerical values by season
+summary(data_weather[data_weather$Season =='Summer',])
+summary(data_weather[data_weather$Season =='Fall',])
+summary(data_weather[data_weather$Season =='Spring',])
+summary(data_weather[data_weather$Season =='Winter',])
+```
+
+Plot data by season temp and year - there is weird increase in variance near the end.
+```{r}
+ggplot(data_weather,aes(x=data_weather$Year)) +
+  geom_line(aes(y=data_weather$Max_Temp_C),color = 'darkred') +
+  geom_line(aes(y=data_weather$Mean_Temp_C), color = 'steelblue')+
+  geom_line(aes(y=data_weather$Min_Temp_C), color = 'black')+
+  facet_wrap(~data_weather$Season)
+
+data_weather <- mutate(data_weather,
+                     "before_2015" = ifelse(data_weather$Year <= 2015, 1,0) )
+```
+
+As n is significantly high, utilized bartlett's test to check variances. k^2 = 1.7478, df = 1, p = 0.1862.
+```{r}
+res <- bartlett.test(Max_Temp_C ~ before_2015, data=data_weather)
+res #k^2 = 1.7478, df = 1, p = 0.1862
+```
+
+Just in case ran Levene's test for equal variances as well. F=2.4684, Df = 1, p = 0.1163 therefore equal variances assumed. Checking Min Max + Counts to find out the change in variations. Prior to 2012 only 1 row per month for each year.  As we are only interested in 2017 and 2018 data, they will not be a problem; variance change explained.
+```{r}
+leveneTest(Max_Temp_C ~ as.factor(before_2015),
+           data=data_weather,
+           center="median")
+
+lstYears = unique(data_weather$Year)
+for(i in lstYears){
+  tmpVar <- select(filter(data_weather, Year == i), Max_Temp_C, Min_Temp_C, Mean_Temp_C)
+  print(paste0("Year:",i," ",
+               "Min:",min(tmpVar,na.rm = T), " ",
+               "Max:",max(tmpVar, na.rm = T), " ",
+               "Count:", nrow(tmpVar)))
+}
+```
+
+Check if min temp > max temp
+```{r}
+nrow(data_weather[data_weather$Max_Temp_C < data_weather$Min_Temp_C,])
+data_weather[data_weather$Max_Temp_C < data_weather$Min_Temp_C,]
+```
+
+Check missing data for the dataset. Also check the missing data for 2017/2018. Some missing data in temp columns; but at least one temperature reading per row available. 
+```{r}
+#Check Missing Data
+missingdata <- md.pattern(data_weather)
+view(missingdata)
+
+#check missing data for 2017/2018
+missingdata <- md.pattern(filter(data_weather, Year == c(2017,2018)))
+view(missingdata)
+```
+
+Check if datetime format works
+```{r}
+test_dates <- parse_date_time(data_weather$Date,c("ymd","dmy"))
+```
+
+2.6 Extracting Variables of Interest, Joining Data, and Merging Sheets
+Creating a list of dfs to hold cleaned, reduced, and joined datasets, which are then joined using Station IDs for Bike Station Dataset, and Date for Weather Dataset.
+
+2.6.1 Extracting and Merging with Bike Station Dataset
+Fuzzy Match JW Distance criteria set as <0.2, values above 0.2 dropped.
+```{r}
+final_df_list <- list()
+final_df_list[[1]] = NULL
+final_df_list[[2]] = NULL
+final_df_list[[3]] = NULL
+final_df_list[[4]] = NULL
+final_df_list[[5]] = NULL
+final_df_list[[6]] = NULL
+final_df_list[[7]] = NULL
+final_df_list[[8]] = NULL
+
+for(i in 1:6){
+    tmp_df <- merge(csv_rides_import[[i]],df_stations,by.x="from_station_id",by.y="id")
+  
+    keep <- c("trip_id",
+              "trip_duration_seconds",
+              "to_station_id","new_start",
+              "new_end","user_type",
+              "from_station_id",
+              "lat",
+              "lon")
+    
+    tmp_df <- tmp_df[,keep]
+    
+    newnames <- c("trip_id",
+                  "trip_duration_seconds",
+                  "to_station_id",
+                  "new_start",
+                  "new_end",
+                  "user_type",
+                  "startid",
+                  "startlat",
+                  "startlon") 
+  
+    names(tmp_df) <- newnames
+  
+    tmp_df <- merge(tmp_df,df_stations,by.x="to_station_id",by.y="id")
+  
+    keep <- c("trip_id",
+              "trip_duration_seconds",
+              "new_start",
+              "new_end",
+              "user_type",
+              "startid",
+              "startlat",
+              "startlon",
+              "to_station_id",
+              "lat",
+              "lon")
+  
+    tmp_df <- tmp_df[,keep]
+  
+    newnames <- c("trip_id",
+                  "trip_duration_seconds",
+                  "new_start",
+                  "new_end",
+                  "user_type",
+                  "startid",
+                  "startlat",
+                  "startlon",
+                  "endid",
+                  "endlat",
+                  "endlon") 
+  
+    names(tmp_df) <- newnames
+  
+    final_df_list[[i]] <- tmp_df
+}
+
+#Joining and Merging Sheets 7 and 8 (missing Station IDs therefore can't be linked directly)
+
+mergedData.sheet7 <- merge(lstDF[[7]], df_stations, by.x = "b", by.y = "name")
+
+summary(mergedData.sheet7)
+tmp_df <- merge(csv_rides_import[[7]],mergedData.sheet7,by.x="from_station_name", by.y="a")
+names(tmp_df)
+
+keep <- c("trip_id",
+          "trip_duration_seconds",
+          "to_station_name",
+          "new_start",
+          "new_end",
+          "user_type",
+          "d",
+          "id",
+          "lat",
+          "lon")
+
+newnames <- c("trip_id",
+              "trip_duration_seconds",
+              "to_station_name",
+              "new_start",
+              "new_end",
+              "user_type",
+              "d",
+              "startid",
+              "startlat",
+              "startlon")
+
+tmp_df <- tmp_df[,keep]          
+names(tmp_df) <- newnames
+
+tmp_df <- merge(tmp_df,mergedData.sheet7,by.x="to_station_name", by.y="a")
+
+names(tmp_df)
+
+keep <- c("trip_id","trip_duration_seconds","to_station_name",
+          "new_start","new_end","user_type",
+          "d.x","startid","startlat","startlon",
+          "d.y","id","lat","lon") 
+
+newnames <- c("trip_id","trip_duration_seconds","to_station_name",
+              "new_start","new_end","user_type",
+              "start_d","startid","startlat","startlon",
+              "end_d","endid","endlat","endlon")
+
+tmp_df <- tmp_df[,keep]
+names(tmp_df) <- newnames
+
+mergedData.sheet8 <- merge(lstDF[[8]], df_stations, by.x = "b", by.y = "name")
+summary(mergedData.sheet8)
+
+tmp_df_ <- merge(csv_rides_import[[8]],mergedData.sheet8,by.x="from_station_name", by.y="a")
+
+keep <- c("trip_id","trip_duration_seconds","to_station_name",
+          "new_start","new_end","user_type",
+          "d","id","lat","lon")
+
+newnames <- c("trip_id","trip_duration_seconds","to_station_name",
+              "new_start","new_end","user_type",
+              "d","startid","startlat","startlon") 
+
+tmp_df_ <- tmp_df_[,keep]          
+names(tmp_df_) <- newnames
+
+tmp_df_ <- merge(tmp_df_,mergedData.sheet8,by.x="to_station_name", by.y="a")
+
+keep <- c("trip_id","trip_duration_seconds","to_station_name",
+          "new_start","new_end","user_type",
+          "d.x","startid","startlat","startlon",
+          "d.y","id","lat","lon") 
+
+newnames <- c("trip_id","trip_duration_seconds","to_station_name",
+              "new_start","new_end","user_type",
+              "start_d","startid","startlat","startlon",
+              "end_d","endid","endlat","endlon") 
+
+tmp_df_ <- tmp_df_[,keep]
+names(tmp_df_) <- newnames
+head(tmp_df_)
+summary(tmp_df_)
+
+#Fuzzy Match JW Distance criteria set as <0.2, values above 0.2 dropped.
+
+tmp_df[,'end_d'] <- as.double(tmp_df$end_d)
+tmp_df[,'start_d'] <- as.double(tmp_df$start_d)
+
+summary(tmp_df)
+nrow(tmp_df)
+nrow(tmp_df[!((tmp_df$end_d < 20) & (tmp_df$start_d<20)),])
+tmp_df <- tmp_df[(tmp_df$end_d < 20) & (tmp_df$start_d<20),]
+nrow(tmp_df)
+summary(tmp_df)
+
+tmp_df_[,'end_d'] <- as.double(tmp_df_$end_d)
+tmp_df_[,'start_d'] <- as.double(tmp_df_$start_d)
+nrow(tmp_df_)
+nrow(tmp_df_[!((tmp_df_$end_d < 20) & (tmp_df_$start_d<20)),])
+tmp_df_ <- tmp_df_[(tmp_df_$end_d < 20) & (tmp_df_$start_d<20),]
+summary(tmp_df_)
+names(tmp_df_)
+
+keep <- c("trip_id","trip_duration_seconds","new_start",
+          "new_end","user_type","startid",
+          "startlat","startlon","endid","endlat","endlon")
+
+tmp_df <- tmp_df[,keep]
+tmp_df[,'startid'] <- as.numeric(as.character(tmp_df$startid))
+tmp_df[,'endid'] <- as.numeric(as.character(tmp_df$endid))
+
+tmp_df_ <- tmp_df_[,keep]
+tmp_df_[,'startid'] <- as.numeric(as.character(tmp_df_$startid))
+tmp_df_[,'endid'] <- as.numeric(as.character(tmp_df_$endid))
+
+final_df_list[[7]] <- tmp_df
+final_df_list[[8]] <- tmp_df_
+#str(final_df_list) commented out due to long list of output
+```
+
+2.6.2 Combining Cleaned Datasets into One Dataframe
+Realised that user_type was not standardized; corrected. 
+```{r}
+bigdata <- bind_rows(final_df_list,.id="column_label")
+
+names(bigdata)
+nrow(bigdata)
+head(bigdata)
+summary(bigdata)
+
+table(bigdata$user_type)
+bigdata$user_type[bigdata$user_type == 'Annual Member'] <- "Member"
+bigdata$user_type[bigdata$user_type == 'Casual Member'] <- "Casual"
+```
+
+2.6.3 Calculating Trip Distance
+Calculating distance from start station to end station using Haversine formula.
+```{r}
+names(bigdata)
+summary(as.double(bigdata$endlon))
+
+bigdata <- mutate(bigdata, 
+       dist = distHaversine(cbind(as.numeric(startlon),as.numeric(startlat)),
+                            cbind(as.numeric(endlon),as.numeric(endlat))))
+
+summary(bigdata$dist)
+```
+
+Checking trip times for outliers
+```{r}
+summary(bigdata$trip_duration_seconds)
+bigdata[bigdata$trip_duration_seconds==6382030,]
+
+time.interval <- bigdata$new_start %--% bigdata$new_end
+time.duration <- as.duration(time.interval)
+summary(time.duration)
+
+nrow(bigdata[bigdata$trip_duration_seconds < 120,])
+nrow(bigdata[bigdata$dist==min(bigdata$dist),])
+
+#people who rented and returned it back to where they got it from
+nrow(bigdata[bigdata$dist==min(bigdata$dist) & bigdata$trip_duration_seconds == 0,])
+names(bigdata)
+
+#No outliers removed - ns noted below
+#No lower limit set to evaluate how many people changed their minds.
+
+nrow(bigdata[bigdata$trip_duration_seconds > 86400,]) #n=174
+nrow(bigdata[bigdata$trip_duration_seconds < 60,]) #n=28168
+```
+
+2.6.4 Adding Weather Data for Trip Date
+Data merged by start of trip not end.
+```{r}
+tmp_starts <- bigdata[c('new_start','trip_id')]
+tmp_starts$year <- year(tmp_starts$new_start)
+tmp_starts$month <- month(tmp_starts$new_start)
+tmp_starts$day <- day(tmp_starts$new_start)
+
+summary(tmp_starts)
+
+tmp_starts <- merge(tmp_starts,data_weather, 
+                    by.y=c('Year','Month','Day'),
+                    by.x=c('year','month','day'), 
+                    all.x = TRUE)
+
+summary(tmp_starts)
+
+keep <- c("trip_id", "Max_Temp_C", "Min_Temp_C", "Mean_Temp_C",
+          "Total_Rain_mm","Total_Snow_cm", "Total_Precip_mm", "Season")
+tmp_starts <- tmp_starts[,keep]
+names(tmp_starts)
+
+finaldata <- merge(bigdata,tmp_starts,by='trip_id')
+summary(finaldata)
+```
+
+3.0 Significant Data Exploration
+This section details the data exploration process, findings, and assumptions. 
+
+3.1 Outliers
+The finaldata dataset has 3,291,055 trips in total. The trip duration ranging from 1 to 6,382,030 seconds (approximate 74 days), suggesting outliers in the data, see part of the snip of R below.
+```{r}
+summary(finaldata)
+str(finaldata)
+6382030/60/60/24# duration of trips max 74 days
+```
+
+We considered trips less than a minute to be false trips, so we removed these 27,997 trips. We also removed 172 trips longer than a day. In total we removed 28,169 trips, around 0.8% of the observations.
+```{r}
+# remove out-of-scope outlier that less than a min and more than 1 day
+exploration <- filter(finaldata, finaldata$trip_duration_seconds >= 60)
+exploration <- filter(finaldata, finaldata$trip_duration_seconds >= 60 & finaldata$trip_duration_seconds <= 24*60*60)
+summary(exploration)
+#3291055 trips, 3263058 trips longer than 1 min, 3262886 trips longer than a minute and less than a day.
+```
+
+3.2 Analysis
+In the analysis, we want to identify the following:
+1.	Who is using Bike Share? Are there distinct differences between members vs. casual users' behaviours? What are the differences?
+2.	When are people using Bike Share? How does usage change across the year, the week and the day?
+3.	How is Bike Share being used? Are people mostly using Bike Share one way or two way? What are the busy stations? 
+
+3.2.1 Who Is Using Bike Share?
+There are 2 types of users for the Bike Share Program; a "Casual" user that pays per ride, and a "Member" user that has unlimited access to rides year-round for the first 30 minutes for a $99 annual subscription fee.
+
+There are 2.6mil (81%) member users and 620K (19%) causal users. In addition, there is a distinct difference in behaviours between the members and casual users: member users use bike share for a shorter period of time. Average trip duration for member users is 12 mins (711/60), while casual users approximately bike 35 mins per trip (2087/60).    
+```{r}
+trip <- exploration %>% 
+  group_by(user_type) %>% 
+  summarise(Total_number_of_trips = n(),Average_Trip_Duration = mean(trip_duration_seconds))
+view(trip)
+trip$Total_number_of_trips/nrow(exploration)
+# a distinct difference in behaviours between the members and casual users: 
+#2.6mil (81%) member users and 620K (19%) causal users; member users use bike share for a shorter period of time 
+711/60 #member 12 mins
+2087/60 # casual 35mins
+2642671/3262886
+```
+
+3.2.2 When Are People Using Bike Share?
+First, we created data frame that adds day, month, year columns for analysis. 
+```{r}
+exploration$new_start1 <- as.Date(exploration$new_start)
+exploration$year <- year(ymd(exploration$new_start1))
+exploration$month <- month(ymd(exploration$new_start1)) 
+exploration$day <- day(ymd(exploration$new_start1))
+str(exploration)
+```
+
+Then, we summarized the # of trips per month by user types as below. 
+```{r}
+# member users month analysis 
+monthly_member = exploration %>%
+  filter(user_type=="Member")%>%
+  group_by(month) %>%
+  summarize(member_no_of_trips=n()) %>%
+  arrange(desc(member_no_of_trips))
+#view(monthly_member)
+
+#casusal users month analysis
+monthly_casual = exploration %>%
+  filter(user_type=="Casual")%>%
+  group_by(month) %>%
+  summarize(casual_no_of_trips=n()) %>%
+  arrange(desc(casual_no_of_trips))
+#view(monthly_casual)
+
+#member user weekday analysis
+exploration$weekday <- weekdays(exploration$new_start1)
+str(exploration)
+weekday_member = exploration %>%
+  filter(user_type=="Member")%>%
+  group_by(weekday) %>%
+  summarize(member_no_of_trips=n())%>%
+  arrange(desc(member_no_of_trips))
+#view(weekday_member)
+
+#casual user weekday analysis
+weekday_casual = exploration %>%
+  filter(user_type=="Casual")%>%
+  group_by(weekday) %>%
+  summarize(casual_number_of_trips=n())%>%
+  arrange(desc(casual_number_of_trips))
+#view(weekday_casual)
+```
+
+Then we looked at the number of trips by the hour that the users were taken in, faceted by the day of the week. We used the following R code to add the hour column, sorted the weekday in sequence.
+```{r}
+exploration$right <- str_sub(exploration$new_start, -8,-1) 
+exploration$hour <- str_sub(exploration$right, 1,2)
+exploration$hour <- as.factor(exploration$hour)
+str(exploration)
+exploration$weekday <- factor(exploration$weekday,levels = c("Sunday","Monday", 
+                      "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"))
+exploration[order(exploration$weekday),]
+hour <- exploration %>% group_by(weekday,hour) %>%
+  summarise(number_of_trips = n()) %>%
+  #view(hour)
+```
+
+3.2.3 How IS Bike Share Being Used?
+First, we identified the one way rider vs two way rider. There are 3,167,353 two-way trips, takes up 97% of the total trips. 
+```{r}
+# 1 way or 2 way travellers
+exploration$twoway <- ifelse(exploration$startid != exploration$endid,1,0)
+sum(exploration$twoway)
+sum(exploration$twoway)/nrow(file)
+# 97% is the two way travellers
+```
+
+Among the two-way trips,  we identified the top 10 busy starting stations. And we also identified the top 10 destination stations with the most trips.
+```{r}
+# top 10 starting stations with most trips
+busy_start <- exploration %>%
+  filter(twoway == 1) %>%
+  group_by(startid, startlat, startlon) %>%
+  summarise(N_trips = n()) %>%
+  arrange(desc(N_trips)) %>%
+  head(10)
+print(busy_start)
+
+# top 10 destination stations 
+busy_dest <- exploration %>%
+  filter(twoway == 1)%>%
+  group_by(endid, endlat, endlon) %>%
+  summarise(N_trips = n()) %>%
+  arrange(desc(N_trips)) %>%
+  head(10)
+print(busy_dest)
+```
+
+We used the following R codes to lookup the major intersection of the top 10 busy starting and destination stations based on the df_stations dataframe. 
+
+We can see that the busy stations are at downtown core, close to ttc public transit. 
+And York/Queens Quay W and Union Station are the top 2 stations, as people would like to use Bike Share to get to the subway and GO station, or get off at subway/GO and use Bike Share to get to their destinations.  
+```{r}
+# add station names for top 10 start stations 
+str(df_stations)
+select_station <- select(df_stations, id, name)
+str(select_station)
+select_station1 <- merge(busy_start,select_station,by.x="startid", by.y="id")
+start_name <- unique(select_station1) %>%
+  arrange(desc(N_trips)) 
+print(start_name)
+
+# add station names for top 10 destination stations
+select_station2 <- select(df_stations, id, name)
+select_station3<-merge(busy_dest,select_station2,by.x="endid", by.y="id")
+dest_name<-unique(select_station3) %>%
+  arrange(desc(N_trips))
+print(dest_name)
+```
+
+Also, we try to identify the most popular bike routes using the following R code. 
+```{r}
+# filter two way trips
+two_way <- filter(exploration, exploration$startid != exploration$endid)
+#Count combinations of startid and endid to get popular routes
+popular_route <- count_(two_way, vars = c("two_way$startid", "two_way$endid"), sort = TRUE)
+head(popular_route,10)
+
+select_station4 <- select(df_stations, id, name)
+select_station5 <- merge(popular_route, select_station4, by.x="two_way$endid", by.y="id")
+popular_route1 <- unique(select_station5) %>%
+  arrange(desc(n)) 
+#print(popular_route1)
+
+select_station6 <- select(df_stations, id, name)
+select_station7 <- merge(popular_route1, select_station6, by.x="two_way$startid", by.y="id")
+popular_route2 <- unique(select_station7) %>%
+  arrange(desc(n)) 
+#print(popular_route2)
+
+colnames(popular_route2)
+popular_route_final <- rename(
+  popular_route2, c("startid" = "two_way$startid", "endid" = "two_way$endid", "n_trips" = "n",
+  "start_station_name" = "name.y", "end_station_name" = "name.x"))
+popular_route_final <- popular_route_final[,c(1,2,3,5,4)]
+#print(popular_route_final)
+
+```
+
+4.0 Visualization Data for Insight Generation
+This section details the data visualization process, findings, and assumptions. 
+
+4.1 User Type Analysis
+The analysis show a shift in the peak season between members and casual users; member users peak in Sept (month9) while casual members peak in July (month7). We performed the weekday analysis below and find that members primarily bike on weekdays while casual users are mostly biking during the weekends.  As members use bike share for a shorter period and mostly use bike shares during the weekday, it seems that members use bike share mainly for commute purpose. On the other hand, casual riders use bike share for a longer period and mostly during weekend, it looks like that they use bike share mainly for leisure purpose. 
+
+4.1.1 Member Weekday Analysis
+The graph below indicates that members primarily bike on weekdays. It also shows that Bike Share usage for member peaks on Wednesday.
+```{r}
+weekday_member$weekday_rearranged <- factor(weekday_member$weekday, levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+graph1<-ggplot(weekday_member,aes(y=member_no_of_trips,x=weekday_rearranged))+geom_col()+
+ labs(title="Number of Trips in a week by Member",
+      y="Number of Trips",
+      x="Weekday")+scale_y_continuous(labels=function(x) format(x,scientific=FALSE))
+graph1
+```
+
+4.1.2 Member Month Analysis
+The graph below indicates that the Bike Share usage for members peak in September.
+```{r}
+monthly_member$month_abbreviation <- month.abb[monthly_member$month]
+monthly_member$month_rearranged <- factor(monthly_member$month_abbreviation, levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+graph2<-ggplot(monthly_member,aes(y = member_no_of_trips,x = month_rearranged))+geom_col()+
+ labs(title = "Number of Trips in a month by Member",
+      y = "Number of Trips",
+      x = "Month") + scale_y_continuous(labels=function(x) format(x,scientific=FALSE))
+graph2
+```
+
+4.1.3 Casual User Weekday Analysis
+The graph below indicates that members primarily bike on weekends. It also shows that Bike Share usage for casual user peaks on Saturday and Sunday.
+```{r}
+weekday_casual$weekday_rearranged <- factor(weekday_casual$weekday, levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+graph3<-ggplot(weekday_casual,aes(y=casual_number_of_trips,x=weekday_rearranged))+geom_col()+
+  labs(title="Number of Trips in a week by Casual member",
+       y="Number of Trips",
+       x="Weekday")+scale_y_continuous(labels=function(x) format(x,scientific=FALSE))
+graph3
+```
+
+4.1.4 Casual User Month Analysis
+The graph below indicates that the Bike Share usage for casual user peaks in July. 
+```{r}
+monthly_casual$month_abbreviation <- month.abb[monthly_casual$month]
+monthly_casual$month_rearranged <- factor(monthly_casual$month_abbreviation, levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+graph4<-ggplot(monthly_casual,aes(y=casual_no_of_trips,x=month_rearranged))+geom_col()+
+  labs(title="Number of Trips in a month by Casual member",
+       y="Number of Trips",
+       x="Month")+scale_y_continuous(labels=function(x) format(x,scientific=FALSE))
+graph4
+```
+
+4.2 Hourly Analysis
+There are two peaks at 8-9am and 4-6pm during the weekdays, when people go to work/school and finish work/school.  
+```{r}
+hourly_analysis <- ggplot(hour, aes(x = hour, y = number_of_trips)) +  
+  geom_bar(stat="identity") + facet_wrap(.~weekday)
+hourly_analysis
+```
+
+5.0 Predictive Modelling
+This section details the predictive modelling process, findings, and assumptions. 
+We determine linear regression methodology is more feasible than time series approach, because there are multiple variables in the dataset. The time series predictive analysis works better with purely numeric data. 
+
+In addition, some variables are categorical variables and might have certain cardinality. Therefore, an algorithm that can convert categorical variables into indicator variables (dummy variables) should be chosen. 
+
+The predictive model is used to predict number of bike riders in the future at a daily basis. The final predictive model is:
+Number of Bike Rider ~ β_0 + β_1X_1 + β_2X_2 + β_3X_3 + β_4X_4 + β_5X_5 + β_6X_6 + β_7X_7 + β_8X_8 + β_9X_9
+where∶ 
+β_0 = 1571.10	
+β_1 = 170.13	  X_1 = Temperature (avg_Temp)
+β_2 = -115.94	  X_2 = daily precipitation (avg_Precip)
+β_3 = 1287.27	  X_3 = summer
+β_4 = 1351.21	  X_4 = fall
+β_5 = 809.61	  X_5 = Tuesday
+β_6 = 1234.90	  X_6 = Wednesday
+β_7 = 1221.50	  X_7 = Thursday
+β_8 = 888.71	  X_8 = Friday
+β_9 = 54.08	    X_9 = month
+
+5.1 Train
+5.1.1 Grouping Data at Daily Level
+Since data has been cleaned up in Data Cleaning part, we assigned finaldata to a new dataframe called modelling. After reviewing 21 columns, we decided to add weekday, day, month and year into modelling dataframe. Then we summarized modelling dataframe at daily level by grouping by trip_id which was then indicated as Number_of_bike_users. Therefore, we could build linear regression model to predict number of bike users in a daily basis. The new dataframe was named as by_date.
+```{r}
+modelling <- finaldata
+str(modelling)
+# add date, year, month, day and weekdays column
+
+modelling$new_start2 <- as.Date(modelling$new_start)
+modelling$weekday <- weekdays(modelling$new_start2)
+modelling$year <- year(ymd(modelling$new_start2))
+modelling$month <- month(ymd(modelling$new_start2)) 
+modelling$day <- day(ymd(modelling$new_start2))
+str(modelling)
+
+# group by date
+by_date = modelling %>%
+  group_by(new_start2, Season, weekday, month) %>%
+  summarise(trip_id = n(), 
+            avg_Temp = mean(Mean_Temp_C),
+            avg_Precip = mean(Total_Precip_mm)
+            )
+view(by_date)
+str(by_date)
+names(by_date) [5] <- "Number_of_bike_users"
+head(by_date)
+```
+
+5.1.2 Split Data for Train and Test
+Before actually running the regression model, we decided to split by_date dataframe for training and testing by 70% and 30%, and named training dataframe as model_data  and testing dataframe as test_data.
+```{r}
+#split by_date data up for train and test dataframes 
+# 70% for train and 30% for test
+
+set.seed(123)
+indices <- sample (nrow(by_date),0.70* nrow(by_date))
+model_data <- by_date[indices, ]
+test_data <- by_date[-indices, ]
+```
+
+5.1.3 Linear Regression Modelling
+We used model_data to run first linear regression model including variables of season, weekday, month, daily average temperature and daily total precipitation. From bike user perspective, riding a bike could be affected by outside weather conditions such as temperature, precipitation. Number of bike riders at Toronto could be influenced by seasonality especially at downtown Toronto. Increase in number of bike users could be probably observed during weekend and warmer seasons. Fewer bike users are expected during bad weather and cold seasons. 
+The first regression model showed that variables of Summer, Tuesday, Wednesday, Thursday with p-value higher than the arbitrarily set alpha value of 0.05, which are not statistically significant to this model. 
+
+
+There are also 33 missing observations. The weather dataset has missing values starting from mid November 2018 to the end of December 2018. Since they are not missing at random, we decide to let the linear regression model to drop them directly. 
+```{r}
+reg1 <- lm(Number_of_bike_users ~ Season + weekday + month + avg_Temp + avg_Precip, model_data)
+summary(reg1)
+par(mfrow = c(2,2))
+plot(reg1)
+plot(density(resid(reg1)))
+```
+
+Adding weekday/weekend, season as dummy variables. After adding dummy variables, ran the regression model again.
+```{r}
+model_data$spring <- ifelse(model_data$Season == 'Spring',1,0)
+model_data$summer <- ifelse(model_data$Season == 'Summer',1,0)
+model_data$fall <- ifelse(model_data$Season == 'Fall',1,0)
+model_data$winter <- ifelse(model_data$Season == 'Winter',1,0)
+
+model_data$Monday <- ifelse(model_data$weekday == 'Monday',1,0)
+model_data$Tuesday <- ifelse(model_data$weekday == 'Tuesday',1,0)
+model_data$Wednesday <- ifelse(model_data$weekday == 'Wednesday',1,0)
+model_data$Thursday <- ifelse(model_data$weekday == 'Thursday',1,0)
+model_data$Friday <- ifelse(model_data$weekday == 'Friday',1,0)
+model_data$Saturday <- ifelse(model_data$weekday == 'Saturday',1,0)
+model_data$Sunday <- ifelse(model_data$weekday == 'Sunday',1,0)
+
+#run regression model with dummies
+reg2 <- lm(Number_of_bike_users ~ avg_Temp + avg_Precip + spring + summer + fall + winter  + Monday + Tuesday + Wednesday + Thursday + Friday + Saturday + Sunday + month, model_data)
+
+summary(reg2)
+```
+
+Remove spring, winter, Saturday
+```{r}
+# remove spring, winter, Saturday
+reg3 <- lm(Number_of_bike_users ~ avg_Temp + avg_Precip + summer  + fall + Monday + Tuesday + Wednesday + Thursday + Friday + Sunday + month, model_data)
+
+summary(reg3)
+```
+
+Remove Monday and Sunday
+```{r}
+#remove Monday and Sunday
+reg4 <- lm(Number_of_bike_users ~ avg_Temp + avg_Precip + summer  + fall + Tuesday + Wednesday + Thursday + Friday + month, model_data)
+
+summary(reg4)
+```
+
+Heteroskedasticity was observed by Residuals vs. Fitted plot based on final regression model. 
+```{r}
+par(mfrow = c(2,2))
+plot(reg4)
+plot(density(resid(reg4)))
+```
+
+We ran Breusch-Pagan test and used the HCCME method to produce heteroskedasticity consistent inferences and test.
+```{r}
+ncvTest(reg4) #Breusch-Pagan test
+
+#here we use the HCCME method to produce heteroskedasticity consistent inferences and tests
+rob_reg <- lm_robust(Number_of_bike_users ~ avg_Temp + avg_Precip + summer  + fall + Tuesday + Wednesday + Thursday + Friday + month, model_data, se_type="HC3")
+
+summary(rob_reg)
+```
+
+5.2 Test
+After finalizing regression model, we applied final model into test_data dataframe and compared the result variations. 
+```{r}
+# apply regression into test_data and compare the predictive number of bike users with test data values
+# we need to add all dummy variables into test data for have same columns as model_data
+
+# adding weekday/weekend, season as dummy variables.
+test_data$spring <- ifelse(test_data$Season == 'Spring',1,0)
+test_data$summer <- ifelse(test_data$Season == 'Summer',1,0)
+test_data$fall <- ifelse(test_data$Season == 'Fall',1,0)
+test_data$winter <- ifelse(test_data$Season == 'Winter',1,0)
+
+test_data$Monday <- ifelse(test_data$weekday == 'Monday',1,0)
+test_data$Tuesday <- ifelse(test_data$weekday == 'Tuesday',1,0)
+test_data$Wednesday <- ifelse(test_data$weekday == 'Wednesday',1,0)
+test_data$Thursday <- ifelse(test_data$weekday == 'Thursday',1,0)
+test_data$Friday <- ifelse(test_data$weekday == 'Friday',1,0)
+test_data$Saturday <- ifelse(test_data$weekday == 'Saturday',1,0)
+test_data$Sunday <- ifelse(test_data$weekday == 'Sunday',1,0)
+
+str(test_data)
+```
+
+We added a column named as predicted_number_of_bike_Users
+```{r}
+#add a column names as predicted_number_of_bike_Users
+test_data$predicted_number_of_bike_users <- as.integer( 1571.10 
+                                                      + 170.13  * test_data$avg_Temp 
+                                                      - 115.94  * test_data$avg_Precip 
+                                                      + 1287.27 * test_data$summer
+                                                      + 1351.21 * test_data$fall
+                                                      + 809.61  * test_data$Tuesday
+                                                      + 1234.90 * test_data$Wednesday
+                                                      + 1221.50 * test_data$Thursday
+                                                      + 888.71  * test_data$Friday
+                                                      + 54.08   * test_data$month)
+view(test_data)
+#write.csv(test_data,"C:\\Users\\14168\\OneDrive - Queen's University\\Queens' MMA\\MMA 860 Acquisition and Management of Data\\Team Project\\3. Bike Share\\predictive modelling analysis.csv")
+```
+
+
