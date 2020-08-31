@@ -1,5 +1,5 @@
 ---
-title: "MMA867 Individual Assignment"
+title: "Kaggle Competition: House Prices: Advanced Regression Techniques"
 output:
   word_document: default
   html_notebook: default
